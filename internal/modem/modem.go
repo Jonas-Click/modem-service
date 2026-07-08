@@ -473,7 +473,7 @@ func (m *Manager) IsModemPresent() bool {
 }
 
 // WaitForModem waits for the modem to come up. The USB network interface
-// (e.g. wwu1i5) appears before ModemManager finishes probing the device
+// (e.g. wwan0) appears before ModemManager finishes probing the device
 // on D-Bus, so we wait for both: interface present AND D-Bus registration.
 func (m *Manager) WaitForModem(ctx context.Context, interfaceName string) error {
 	m.logger.Printf("Waiting for modem to come up...")

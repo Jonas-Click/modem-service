@@ -783,8 +783,9 @@ func (s *Service) attemptGPSRecovery(trigger error) error {
 //   - Tried re-enabling XTRA (AT+CGPSXE=1, AT+CGPSXDAUTO=1). Chip emits
 //     "+CGPSXD: 2" ("Assistant file check error" per SIMCom AT manual
 //     V1.01 §19.20) on every attempt. Verified the host can fetch the
-//     same xtra2.bin from xtrapath1.izatcloud.net via wwu1i5 (HTTP 200,
-//     34 KB), and chip clock is correct (CTZU=1 → NITZ-synced). HTP time
+//     same xtra2.bin from xtrapath1.izatcloud.net via the modem
+//     interface (HTTP 200, 34 KB), and chip clock is correct
+//     (CTZU=1 → NITZ-synced). HTP time
 //     sync (AT+CHTPSERV/CHTPUPDATE) makes no difference; the chip rejects
 //     the file. Most plausible cause: Qualcomm rotated XTRA signing keys
 //     post-2018, SIM7100E firmware has the old root in ROM. Not fixable

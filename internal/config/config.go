@@ -19,7 +19,7 @@ func New() *Config {
 
 	flag.StringVar(&cfg.RedisURL, "redis-url", "redis://127.0.0.1:6379", "Redis URL")
 	flag.DurationVar(&cfg.InternetCheckTime, "internet-check-time", 30*time.Second, "Internet check interval")
-	flag.StringVar(&cfg.Interface, "interface", "wwu1i5", "Network interface to monitor")
+	flag.StringVar(&cfg.Interface, "interface", "wwan0", "Network interface to monitor")
 	flag.StringVar(&cfg.GpsdServer, "gpsd-server", "localhost:2947", "GPSD server address")
 	// Port 7276 is the plain-TCP SUPL port; 7275 is TLS-only and requires
 	// a cert that we don't ship (and CGPSSSL=0). Forum-validated config.
