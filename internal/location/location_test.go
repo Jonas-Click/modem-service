@@ -5,9 +5,36 @@ import (
 	"io"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/godbus/dbus/v5"
 )
+
+func TestCloseClearsFixState(t *testing.T) {
+	logger := log.New(io.Discard, "", 0)
+	s := NewService(logger, "", nil, "")
+
+	// Simulate a valid fix captured just before teardown (e.g. parking
+	// outdoors before the scooter suspends).
+	s.hasValidFix.Store(true)
+	s.stateMutex.Lock()
+	s.currentLoc = Location{Latitude: 52.5, Longitude: 13.4, Timestamp: time.Now()}
+	s.lastFix = time.Now()
+	s.stateMutex.Unlock()
+
+	s.Close()
+
+	if s.HasValidFix() {
+		t.Error("HasValidFix() = true after Close(), want false (stale fix would be replayed into the clock on resume)")
+	}
+	if ts := s.CurrentLoc().Timestamp; !ts.IsZero() {
+		t.Errorf("CurrentLoc().Timestamp = %v after Close(), want zero", ts)
+	}
+	// Last known position is deliberately kept for last-known consumers.
+	if loc := s.CurrentLoc(); loc.Latitude == 0 || loc.Longitude == 0 {
+		t.Errorf("CurrentLoc() lat/lng cleared = %+v, want preserved", loc)
+	}
+}
 
 func TestIsStalePathError(t *testing.T) {
 	cases := []struct {

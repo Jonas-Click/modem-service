@@ -1131,6 +1131,22 @@ func (s *Service) Close() {
 	// state="off" while connected=true.
 	s.gpsdConnected.Store(false)
 	s.state.Store("off")
+
+	// Drop the fix indicators. Without this, hasValidFix and currentLoc
+	// survive a Close() (e.g. the disableModem call on the way into suspend)
+	// and get replayed after resume: the first-fix clock bootstrap reads the
+	// stale HasValidFix()==true and feeds the hours-old currentLoc.Timestamp
+	// to chronyc settime, stepping the wall clock back to park time. A
+	// monotonic staleness guard can't catch this because CLOCK_MONOTONIC is
+	// frozen during suspend, so we clear the state at the teardown boundary
+	// instead. Last lat/lng is preserved for last-known-position consumers;
+	// only the fix flag and the timestamps that gate clock-sync are cleared.
+	s.hasValidFix.Store(false)
+	s.stateMutex.Lock()
+	s.currentLoc.Timestamp = time.Time{}
+	s.lastFix = time.Time{}
+	s.stateMutex.Unlock()
+
 	s.configMutex.Lock()
 	if s.GpsdConn != nil {
 		s.GpsdConn.Close()
