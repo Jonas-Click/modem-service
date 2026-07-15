@@ -162,9 +162,11 @@ Reception has two independent paths into the same `processOne` classifier
 2. **Poll / startup** (reliable fallback for modems that don't emit `Added` for
    stored messages): `DrainReceived` lists storage and processes each object.
 
-An inbound message is only returned once it has been deleted — if the delete
-fails we skip delivery and leave it for a later drain, so we never re-publish the
-same message. `publishIncomingSMS` then writes `last-received-from`,
+An inbound message is delivered even when its delete fails: some modems report
+a delete error but drop the object anyway, and skipping delivery there would
+lose mail. Delivered-but-undeleted objects are remembered (keyed by path plus
+message identity), so later drains only retry the delete and never publish a
+duplicate. `publishIncomingSMS` then writes `last-received-from`,
 `last-received-text`, `last-received-at`, `unread-count` in one batch with a
 single `last-received-at` notification.
 
@@ -205,7 +207,7 @@ is a GPS-only optimisation for its 1 Hz update rate, which SMS does not have).
 recorder: send happy path, no-modem, empty recipient, create failure, send
 failure (still deletes), and drain cases (inbound received, inbound in `stored`
 state, inbound with unknown PduType, status-report deleted, outbound left,
-incomplete left, delete-failure defers delivery, mixed batch). Plus
+incomplete left, delete-failure delivers exactly once, mixed batch). Plus
 `parseTimestamp`. `internal/redis/redis_test.go` gains `TestPublishSMSState` and
 `TestPublishSMSFields` (skipped when no Redis is reachable, like the others).
 
@@ -221,7 +223,7 @@ Two integration touch points are covered manually on hardware:
 |---|---|
 | Send while no modem present | `handleSMSCommand` publishes `state=error`, returns. |
 | Send fails at the modem | Created object is deleted anyway; `state=error`. |
-| Delete of a received message fails | Not delivered this round; left in storage; retried on the next drain (avoids re-publishing duplicates). |
+| Delete of a received message fails | Delivered anyway (some modems drop the object despite the error); remembered so later drains only retry the delete, never re-publish. |
 | Status-report (delivery report) object | Deleted on drain, never published, so it can't fill the store. |
 | Multipart SMS still assembling | `state == receiving` → left; a later `Added`/poll picks it up once complete. |
 | Modem never emits `Added` for stored SMS | The `monitorStatus` periodic poll drains them within one tick. |
