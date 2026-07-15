@@ -767,6 +767,7 @@ func (s *Service) startSMSRegistrationWatchdog(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(1 * time.Minute)
 		defer ticker.Stop()
+		msisdnWarned := false
 		for {
 			select {
 			case <-ctx.Done():
@@ -780,6 +781,18 @@ func (s *Service) startSMSRegistrationWatchdog(ctx context.Context) {
 				if idle < 13*time.Minute {
 					continue // CS was active recently; SGs timer not at risk
 				}
+				// No MSISDN means the voice-call keepalive can never work, and
+				// that is a property of the SIM, not a transient failure. Do
+				// NOT escalate to CFUN/radio cycles in that case: they cost
+				// ~30 s of connectivity per round and would repeat forever.
+				if s.ownNumber() == "" {
+					if !msisdnWarned {
+						s.Logger.Printf("sms: SGs keepalive disabled: own MSISDN unknown (SIM has no number stored); inbound SMS may stop after CS idle timeout")
+						msisdnWarned = true
+					}
+					continue
+				}
+				msisdnWarned = false
 				s.Logger.Printf("sms: no CS activity for %.0f min — sending SGs keepalive", idle.Minutes())
 				if s.refreshSGsViaVoiceCall(ctx) {
 					continue
@@ -850,15 +863,16 @@ func (s *Service) refreshSGsViaCFUN4(ctx context.Context) bool {
 		}
 	}
 
-	// Re-fetch modem path in case MM re-registered the modem with a new D-Bus path.
-	modemPath, err = s.Modem.FindModem()
-	if err != nil {
+	// The cycle can make MM re-register the modem under a new D-Bus path, so
+	// fully re-arm the SMS watch instead of just re-applying CNMI: startSMSWatch
+	// re-resolves the path, re-subscribes the Added signal, reconfigures the
+	// modem, drains storage, and resets the CS idle clock so the watchdog
+	// doesn't fire again on its next tick.
+	if _, err := s.Modem.FindModem(); err != nil {
 		s.Logger.Printf("sms: SGs refresh: modem gone after CFUN cycle: %v", err)
 		return false
 	}
-
-	s.configureAndDiagnoseSMS(modemPath)
-	s.drainSMS(modemPath)
+	s.startSMSWatch(ctx)
 	s.Logger.Printf("sms: SGs refresh complete (CFUN=4/1 fly-mode cycle)")
 	return true
 }
@@ -897,15 +911,17 @@ func (s *Service) refreshSGsViaRadioCycle(ctx context.Context) {
 	}
 
 	// Wait for the modem to complete network registration and APN reconnection
-	// before re-applying CNMI settings and draining any queued messages.
+	// before re-arming the SMS watch and draining any queued messages.
 	select {
 	case <-ctx.Done():
 		return
 	case <-time.After(30 * time.Second):
 	}
 
-	s.configureAndDiagnoseSMS(modemPath)
-	s.drainSMS(modemPath)
+	// Re-arm rather than just reconfigure: the Enable cycle can rebind the
+	// modem's D-Bus path, and startSMSWatch also resets the CS idle clock so
+	// the watchdog doesn't immediately fire another refresh.
+	s.startSMSWatch(ctx)
 	s.Logger.Printf("sms: SGs refresh complete (radio cycle)")
 }
 
