@@ -75,10 +75,7 @@ func (f *fakeDBus) GetSMSProperties(smsPath dbus.ObjectPath) (mm.SMSProperties, 
 }
 
 func newManager(d *fakeDBus) *Manager {
-	return &Manager{
-		dbus:   d,
-		logger: log.New(io.Discard, "", 0),
-	}
+	return New(d, log.New(io.Discard, "", 0))
 }
 
 // --- Send -------------------------------------------------------------------
@@ -227,7 +224,11 @@ func TestDrain_SkipsIncomplete(t *testing.T) {
 	}
 }
 
-func TestDrain_DeleteFailureDefersDelivery(t *testing.T) {
+func TestDrain_DeleteFailureDeliversExactlyOnce(t *testing.T) {
+	// Some modems report a delete error but drop the object anyway, so the
+	// message must be delivered despite the failed delete. If the object DOES
+	// linger, later drains must only retry the delete, never publish a
+	// duplicate.
 	d := &fakeDBus{
 		listPaths: []dbus.ObjectPath{"/sms/1"},
 		props: map[dbus.ObjectPath]mm.SMSProperties{
@@ -238,11 +239,32 @@ func TestDrain_DeleteFailureDefersDelivery(t *testing.T) {
 	m := newManager(d)
 
 	msgs, _ := m.DrainReceived(testModemPath)
-	if len(msgs) != 0 {
-		t.Fatalf("must not deliver a message we couldn't delete, got %d", len(msgs))
+	if len(msgs) != 1 || msgs[0].Text != "ping" {
+		t.Fatalf("message must be delivered despite failed delete, got %+v", msgs)
 	}
-	if len(d.deleted) != 1 {
-		t.Fatalf("expected one delete attempt, got %v", d.deleted)
+
+	// Object still listed on the next drain: no duplicate, one more delete try.
+	msgs, _ = m.DrainReceived(testModemPath)
+	if len(msgs) != 0 {
+		t.Fatalf("lingering object must not be re-delivered, got %d", len(msgs))
+	}
+	if len(d.deleted) != 2 {
+		t.Fatalf("expected two delete attempts, got %v", d.deleted)
+	}
+
+	// Delete starts working: the drain cleans it up without delivering.
+	d.deleteErr = nil
+	msgs, _ = m.DrainReceived(testModemPath)
+	if len(msgs) != 0 {
+		t.Fatalf("cleanup drain must not deliver, got %d", len(msgs))
+	}
+
+	// A NEW message under the reused path must be delivered normally.
+	d.listPaths = []dbus.ObjectPath{"/sms/1"}
+	d.props["/sms/1"] = mm.SMSProperties{Number: "+4931", Text: "new msg", State: mm.MMSmsStateReceived, PduType: mm.MMSmsPduTypeDeliver}
+	msgs, _ = m.DrainReceived(testModemPath)
+	if len(msgs) != 1 || msgs[0].Text != "new msg" {
+		t.Fatalf("new message under reused path must be delivered, got %+v", msgs)
 	}
 }
 

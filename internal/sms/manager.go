@@ -66,6 +66,20 @@ type Manager struct {
 	// mu is a leftover (a previous send whose delete failed) and is therefore
 	// safe to clean up.
 	mu sync.Mutex
+
+	// deliveredUndeleted tracks inbound messages that were handed to the
+	// service but whose delete failed. Guarded by mu. Later drains only retry
+	// the delete for these instead of re-publishing the message. Keyed by
+	// object path with the message identity as the value, so a path that gets
+	// reused for a different message (e.g. after a ModemManager restart) is
+	// still delivered.
+	deliveredUndeleted map[dbus.ObjectPath]messageIdentity
+}
+
+// messageIdentity distinguishes "same SMS object still lingering" from "a new
+// message under a reused D-Bus path".
+type messageIdentity struct {
+	number, text, timestamp string
 }
 
 // New returns a Manager bound to the given D-Bus surface and logger.
@@ -73,7 +87,11 @@ func New(d MessagingDBus, logger *log.Logger) *Manager {
 	if logger == nil {
 		logger = log.Default()
 	}
-	return &Manager{dbus: d, logger: logger}
+	return &Manager{
+		dbus:               d,
+		logger:             logger,
+		deliveredUndeleted: make(map[dbus.ObjectPath]messageIdentity),
+	}
 }
 
 // Send creates an outbound SMS, transmits it, and deletes the object afterwards
@@ -172,9 +190,12 @@ func (m *Manager) DrainReceived(modemPath dbus.ObjectPath) ([]*Message, error) {
 //     no send is in flight, so it can't be a live one)
 //   - everything else                     → treated as inbound: deleted and returned
 //
-// An inbound message is only returned once it has been deleted; if the delete
-// fails we skip delivery and leave it for a later drain, rather than
-// re-publishing it every time.
+// An inbound message is delivered even when its delete fails: some modems
+// report a delete error but drop the object anyway (e.g. when the QMI WMS and
+// AT steps disagree), and skipping delivery there would silently lose mail.
+// To keep that from turning into a duplicate on every later drain while the
+// object lingers, delivered-but-undeleted objects are remembered and only
+// have their delete retried.
 func (m *Manager) processOne(modemPath, smsPath dbus.ObjectPath) *Message {
 	props, err := m.dbus.GetSMSProperties(smsPath)
 	if err != nil {
@@ -209,6 +230,19 @@ func (m *Manager) processOne(modemPath, smsPath dbus.ObjectPath) *Message {
 		return nil
 
 	default:
+		identity := messageIdentity{number: props.Number, text: props.Text, timestamp: props.Timestamp}
+		if m.deliveredUndeleted[smsPath] == identity {
+			// Already published in an earlier round; the object just wouldn't
+			// delete. Retry the delete, never re-deliver.
+			if err := m.dbus.DeleteSMS(modemPath, smsPath); err != nil {
+				m.logger.Printf("sms: delete retry for already-delivered %s failed: %v", smsPath, err)
+			} else {
+				delete(m.deliveredUndeleted, smsPath)
+				m.logger.Printf("sms: delete retry for already-delivered %s succeeded", smsPath)
+			}
+			return nil
+		}
+
 		msg := &Message{
 			Number:    props.Number,
 			Text:      props.Text,
@@ -219,9 +253,12 @@ func (m *Manager) processOne(modemPath, smsPath dbus.ObjectPath) *Message {
 		if err := m.dbus.DeleteSMS(modemPath, smsPath); err != nil {
 			// MM sometimes reports a delete error but cleans up the object anyway
 			// (e.g. when QMI WMS and AT steps disagree). Deliver regardless so the
-			// message is never silently lost; at worst it may be re-delivered once
-			// on the next startup drain if the modem somehow kept it.
+			// message is never silently lost, and remember it so later drains only
+			// retry the delete instead of publishing a duplicate.
 			m.logger.Printf("sms: delete of %s failed (delivering anyway): %v", smsPath, err)
+			m.deliveredUndeleted[smsPath] = identity
+		} else {
+			delete(m.deliveredUndeleted, smsPath)
 		}
 		return msg
 	}
