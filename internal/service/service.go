@@ -68,9 +68,10 @@ type Service struct {
 	apnPassword           atomic.Value // string; cellular.password
 	apnAuth               atomic.Value // string; cellular.auth ("none"|"pap"|"chap")
 	SMS                   *sms.Manager
+	smsWatchMu            sync.Mutex         // guards smsWatchCancel; startSMSWatch runs from the Run, monitor, and watchdog goroutines
 	smsWatchCancel        context.CancelFunc // cancels the active inbound-SMS watch; re-armed on modem recovery
 	unreadSMS             atomic.Int64       // inbound messages since start; published as sms.unread-count
-	ownMSISDN      string       // scooter's own phone number, resolved once at startup for voice-call keepalive
+	ownMSISDN             atomic.Value       // string; own phone number for the voice-call keepalive, resolved via AT+CNUM
 	lastCSActivity        atomic.Int64       // UnixNano of last confirmed CS event (any SMS sent/received)
 	LastState             *modem.State
 	WaitingForGPSLogged   bool       // Tracks if we've already logged the waiting for GPS message
@@ -306,11 +307,13 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	// Stop the inbound-SMS watch. It also stops when ctx is cancelled (its
-	// context is derived from ctx), but cancel explicitly now that the monitor
-	// goroutine — the only other place that re-arms it — has exited.
+	// context is derived from ctx), but cancel explicitly for a tidy shutdown.
+	s.smsWatchMu.Lock()
 	if s.smsWatchCancel != nil {
 		s.smsWatchCancel()
+		s.smsWatchCancel = nil
 	}
+	s.smsWatchMu.Unlock()
 
 	// Graceful shutdown: keep last lat/lng in Redis as a useful fallback
 	// for consumers, but clear the fix indicators so nobody treats the
@@ -497,9 +500,13 @@ func (s *Service) handleSMSCommand(payload string) error {
 
 // startSMSWatch (re-)arms the inbound-SMS signal watch on the current modem
 // path. It cancels any previous watch, drains messages already in storage, and
-// starts a fresh Added-signal goroutine. Called at startup and after every
-// modem recovery, since a reset can rebind the modem's D-Bus path.
+// starts a fresh Added-signal goroutine. Called at startup, after every modem
+// recovery (a reset can rebind the modem's D-Bus path), and after an SGs
+// refresh; smsWatchMu makes those call sites safe against each other.
 func (s *Service) startSMSWatch(ctx context.Context) {
+	s.smsWatchMu.Lock()
+	defer s.smsWatchMu.Unlock()
+
 	if s.smsWatchCancel != nil {
 		s.smsWatchCancel()
 		s.smsWatchCancel = nil
@@ -517,9 +524,9 @@ func (s *Service) startSMSWatch(ctx context.Context) {
 	}
 
 	// Resolve own MSISDN once so the voice-call keepalive knows what number to dial.
-	if s.ownMSISDN == "" {
+	if s.ownNumber() == "" {
 		if msisdn := s.queryOwnMSISDN(modemPath); msisdn != "" {
-			s.ownMSISDN = msisdn
+			s.ownMSISDN.Store(msisdn)
 			s.Logger.Printf("sms: own MSISDN: %s", msisdn)
 		}
 	}
@@ -637,6 +644,12 @@ func (s *Service) touchCSActivity() {
 	s.lastCSActivity.Store(time.Now().UnixNano())
 }
 
+// ownNumber returns the scooter's own MSISDN, or "" while it is unresolved.
+func (s *Service) ownNumber() string {
+	v, _ := s.ownMSISDN.Load().(string)
+	return v
+}
+
 // queryOwnMSISDN asks the modem for its own subscriber number via AT+CNUM.
 // Returns "" if the command fails or the SIM doesn't have an MSISDN stored.
 func (s *Service) queryOwnMSISDN(modemPath dbus.ObjectPath) string {
@@ -677,7 +690,8 @@ func (s *Service) queryOwnMSISDN(modemPath dbus.ObjectPath) string {
 // The self-call never connects (the same line cannot answer an incoming call
 // while it is placing an outgoing one), so no call charges are incurred.
 func (s *Service) refreshSGsViaVoiceCall(ctx context.Context) bool {
-	if s.ownMSISDN == "" {
+	msisdn := s.ownNumber()
+	if msisdn == "" {
 		s.Logger.Printf("sms: SGs keepalive via voice call skipped: own MSISDN unknown")
 		return false
 	}
@@ -690,7 +704,7 @@ func (s *Service) refreshSGsViaVoiceCall(ctx context.Context) bool {
 	s.Logger.Printf("sms: SGs keepalive — MO call to self (CSFB→EDGE, free)")
 	start := time.Now()
 
-	callPath, err := s.MMClient.CreateCall(modemPath, s.ownMSISDN)
+	callPath, err := s.MMClient.CreateCall(modemPath, msisdn)
 	if err != nil {
 		s.Logger.Printf("sms: SGs keepalive voice call create failed: %v", err)
 		return false
