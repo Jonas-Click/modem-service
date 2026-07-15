@@ -605,14 +605,19 @@ func (s *Service) configureAndDiagnoseSMS(modemPath dbus.ObjectPath) {
 		s.Logger.Printf("sms: enabled new-message indications (AT+CNMI=2,1,0,0,0)")
 	}
 
-	// Diagnostics: current indication/storage config and the modem's own view
-	// of stored SMS (PDU mode, so AT+CMGL=4 returns raw PDUs).
+	// Diagnostics: current indication/storage config.
 	for _, q := range []string{"AT+CPMS?", "AT+CNMI?"} {
 		if resp, err := s.MMClient.SendCommand(modemPath, q, 5*time.Second); err == nil {
 			s.Logger.Printf("sms: %s -> %s", q, strings.TrimSpace(resp))
 		} else {
 			s.Logger.Printf("sms: %s failed: %v", q, err)
 		}
+	}
+	// The raw store dump contains full message PDUs (bodies, hex-encoded), so
+	// it stays behind -debug: the normal logging policy is to never write
+	// message content to the journal.
+	if !s.Config.Debug {
+		return
 	}
 	if _, err := s.MMClient.SendCommand(modemPath, "AT+CMGF=0", 5*time.Second); err == nil {
 		if resp, err := s.MMClient.SendCommand(modemPath, "AT+CMGL=4", 10*time.Second); err == nil {
