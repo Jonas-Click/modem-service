@@ -494,6 +494,11 @@ func (s *Service) handleSMSCommand(payload string) error {
 		return sendErr
 	}
 
+	// An MO SMS goes out over SGs, so it resets the operator's CS idle timer
+	// just like an inbound one; without this the watchdog would fire a
+	// redundant keepalive after a send.
+	s.touchCSActivity()
+
 	if err := s.Redis.PublishSMSFields(map[string]string{
 		"state":        "idle",
 		"last-sent-to": req.To,
