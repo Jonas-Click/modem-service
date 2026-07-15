@@ -683,7 +683,10 @@ func (s *Service) queryOwnMSISDN(modemPath dbus.ObjectPath) string {
 		if num == "" {
 			continue
 		}
-		if !strings.HasPrefix(num, "+") {
+		// Only type 145 (international) numbers may gain a missing "+".
+		// A national-format entry (type 129, e.g. "0157...") must be dialed
+		// as stored; prepending "+" would make it undialable.
+		if len(parts) >= 3 && strings.TrimSpace(parts[2]) == "145" && !strings.HasPrefix(num, "+") {
 			num = "+" + num
 		}
 		return num
