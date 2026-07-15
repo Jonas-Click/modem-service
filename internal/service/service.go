@@ -289,7 +289,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	// Periodically check that the SGs CS registration at the MSC/VLR is still
 	// alive and force a fresh combined attach if it has expired (LAC=0xFFFE).
-	s.startSMSRegistrationWatchdog(ctx)
+	// Opt-in: the keepalive targets operators with a short CS implicit-detach
+	// timer (seen on O2/Lebara DE) and briefly drops to 2G for each self-call,
+	// so it must not run fleet-wide by default.
+	if s.Config.SMSKeepalive {
+		s.startSMSRegistrationWatchdog(ctx)
+	} else {
+		s.Logger.Printf("sms: SGs keepalive disabled (enable with -sms-keepalive if inbound SMS stops after ~15 min idle)")
+	}
 
 	s.Logger.Printf("Starting modem service on interface %s", s.Config.Interface)
 	go s.monitorStatus(ctx)
